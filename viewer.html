@@ -2,57 +2,180 @@
 <html lang="pt-BR">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SafeHer - Rastreamento em tempo real</title>
+    <title>Rastreamento em Tempo Real</title>
 
+    <!-- Bibliotecas -->
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <link
       rel="stylesheet"
       href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
     />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 
     <style>
       html,
       body {
-        height: 100%;
         margin: 0;
         padding: 0;
+        height: 100%;
+        width: 100%;
+        font-family: Arial, sans-serif;
+        background: #f8f9fa;
       }
+
       #map {
         height: 100%;
         width: 100%;
+        display: none; /* Oculta até ter posição inicial */
+      }
+
+      #loading {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        flex-direction: column;
+        background: #f5f5f5;
+        color: #444;
+        font-size: 18px;
+        z-index: 10;
+      }
+
+      .info-panel {
+        position: absolute;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: white;
+        border-radius: 10px;
+        padding: 10px 20px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.25);
+        text-align: center;
+        z-index: 999;
+      }
+
+      .info-panel strong {
+        color: #d32f2f;
+      }
+
+      .info-panel small {
+        display: block;
+        color: #666;
+        margin-top: 5px;
+      }
+
+      .status {
+        margin-top: 10px;
+        font-size: 14px;
+        color: gray;
       }
     </style>
   </head>
+
   <body>
+    <div id="loading">
+      <div>🛰️ Carregando localização inicial...</div>
+      <div class="status" id="status"></div>
+    </div>
+
     <div id="map"></div>
 
+    <div class="info-panel" id="infoPanel">
+      <strong>Usuário:</strong> <span id="userId">--</span>
+      <small>Última atualização: <span id="updatedAt">--</span></small>
+    </div>
+
     <script>
-      const SERVER_URL = window.location.origin;
-      const socket = io(SERVER_URL);
+      // 🌐 Servidor Render (produção)
+      const SERVER_URL = "https://render-real-location.onrender.com";
 
+      // 🧭 Obtém ID do usuário a partir da URL (/track/:userId)
       const userId = window.location.pathname.split("/").pop();
-      const map = L.map("map").setView([-23.55052, -46.633308], 13);
+      document.getElementById("userId").textContent = userId;
 
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 19,
-        attribution: "© OpenStreetMap",
-      }).addTo(map);
+      let map, marker;
+      const loadingText = document.getElementById("loading");
+      const statusText = document.getElementById("status");
+      const updatedAtEl = document.getElementById("updatedAt");
 
-      let marker = null;
+      // 🔌 Conexão WebSocket
+      const socket = io(SERVER_URL, {
+        transports: ["websocket"],
+        reconnection: true,
+        reconnectionAttempts: Infinity,
+        reconnectionDelay: 2000,
+      });
 
-      socket.on("locationUpdate", (data) => {
-        if (data.userId !== userId) return;
+      socket.on("connect", () => {
+        console.log("🟢 Conectado ao servidor");
+        statusText.textContent = "Conectado";
+      });
 
-        const { latitude, longitude } = data;
-        if (!marker) {
-          marker = L.marker([latitude, longitude]).addTo(map);
+      socket.on("disconnect", () => {
+        console.log("🔴 Desconectado");
+        statusText.textContent = "Reconectando...";
+      });
+
+      socket.on("connect_error", (err) => {
+        console.log("⚠️ Erro de conexão:", err.message);
+        statusText.textContent = "Erro de conexão";
+      });
+
+      // 🗺️ Inicializa mapa
+      function initMap(lat, lng) {
+        loadingText.style.display = "none";
+        document.getElementById("map").style.display = "block";
+
+        map = L.map("map").setView([lat, lng], 16);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          maxZoom: 19,
+        }).addTo(map);
+
+        marker = L.marker([lat, lng])
+          .addTo(map)
+          .bindPopup("📍 Localização atual")
+          .openPopup();
+      }
+
+      // 🕒 Atualiza horário formatado
+      function formatTime(isoDate) {
+        const date = new Date(isoDate);
+        return date.toLocaleTimeString("pt-BR", {
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+      }
+
+      // 🔹 Busca localização inicial via API
+      fetch(`${SERVER_URL}/api/location/${userId}`)
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.latitude && data.longitude) {
+            initMap(data.latitude, data.longitude);
+            updatedAtEl.textContent = formatTime(data.updatedAt);
+          } else {
+            loadingText.innerHTML =
+              "⏳ Aguardando primeira localização do usuário...";
+          }
+        })
+        .catch(() => {
+          loadingText.innerHTML =
+            "❌ Não foi possível obter localização inicial.";
+        });
+
+      // 🔁 Atualização em tempo real
+      socket.on(`locationUpdate-${userId}`, (data) => {
+        const { latitude, longitude, updatedAt } = data;
+
+        if (!map) {
+          initMap(latitude, longitude);
         } else {
           marker.setLatLng([latitude, longitude]);
+          map.panTo([latitude, longitude]);
         }
 
-        map.setView([latitude, longitude], 15);
+        updatedAtEl.textContent = formatTime(updatedAt);
       });
     </script>
   </body>
