@@ -4,7 +4,6 @@
     <meta charset="UTF-8" />
     <title>Rastreamento em Tempo Real</title>
 
-    <!-- Bibliotecas -->
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <link
       rel="stylesheet"
@@ -20,25 +19,23 @@
         height: 100%;
         width: 100%;
         font-family: Arial, sans-serif;
-        background: #f8f9fa;
       }
 
       #map {
         height: 100%;
         width: 100%;
-        display: none; /* Oculta até ter posição inicial */
       }
 
       #loading {
         position: absolute;
         inset: 0;
         display: flex;
+        flex-direction: column;
         justify-content: center;
         align-items: center;
-        flex-direction: column;
-        background: #f5f5f5;
-        color: #444;
         font-size: 18px;
+        color: #333;
+        background: #f9f9f9;
         z-index: 10;
       }
 
@@ -48,9 +45,9 @@
         left: 50%;
         transform: translateX(-50%);
         background: white;
-        border-radius: 10px;
         padding: 10px 20px;
-        box-shadow: 0 0 10px rgba(0, 0, 0, 0.25);
+        border-radius: 10px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
         text-align: center;
         z-index: 999;
       }
@@ -75,7 +72,7 @@
 
   <body>
     <div id="loading">
-      <div>🛰️ Carregando localização inicial...</div>
+      <div>🛰️ Aguardando primeira localização...</div>
       <div class="status" id="status"></div>
     </div>
 
@@ -87,58 +84,41 @@
     </div>
 
     <script>
-      // 🌐 Servidor Render (produção)
+      // 🌍 Servidor Render
       const SERVER_URL = "https://render-real-location.onrender.com";
 
-      // 🧭 Obtém ID do usuário a partir da URL (/track/:userId)
+      // 🧭 ID do usuário a partir da URL
       const userId = window.location.pathname.split("/").pop();
       document.getElementById("userId").textContent = userId;
 
       let map, marker;
-      const loadingText = document.getElementById("loading");
+      let hasMarker = false;
+      const loading = document.getElementById("loading");
       const statusText = document.getElementById("status");
       const updatedAtEl = document.getElementById("updatedAt");
 
-      // 🔌 Conexão WebSocket
+      // 🔌 Socket.IO
       const socket = io(SERVER_URL, {
         transports: ["websocket"],
         reconnection: true,
         reconnectionAttempts: Infinity,
-        reconnectionDelay: 2000,
+        reconnectionDelay: 1500,
       });
 
       socket.on("connect", () => {
-        console.log("🟢 Conectado ao servidor");
-        statusText.textContent = "Conectado";
+        statusText.textContent = "Conectado ao servidor ✅";
       });
 
       socket.on("disconnect", () => {
-        console.log("🔴 Desconectado");
         statusText.textContent = "Reconectando...";
       });
 
       socket.on("connect_error", (err) => {
-        console.log("⚠️ Erro de conexão:", err.message);
-        statusText.textContent = "Erro de conexão";
+        statusText.textContent = "Erro de conexão. Tentando novamente...";
+        console.error("Erro socket:", err.message);
       });
 
-      // 🗺️ Inicializa mapa
-      function initMap(lat, lng) {
-        loadingText.style.display = "none";
-        document.getElementById("map").style.display = "block";
-
-        map = L.map("map").setView([lat, lng], 16);
-        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-          maxZoom: 19,
-        }).addTo(map);
-
-        marker = L.marker([lat, lng])
-          .addTo(map)
-          .bindPopup("📍 Localização atual")
-          .openPopup();
-      }
-
-      // 🕒 Atualiza horário formatado
+      // 🕒 Formata horário
       function formatTime(isoDate) {
         const date = new Date(isoDate);
         return date.toLocaleTimeString("pt-BR", {
@@ -147,35 +127,54 @@
         });
       }
 
-      // 🔹 Busca localização inicial via API
+      // 🗺️ Inicializa mapa com posição genérica (Brasil)
+      function initMap() {
+        if (map) return;
+        map = L.map("map").setView([-14.235, -51.9253], 4);
+
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          maxZoom: 19,
+        }).addTo(map);
+      }
+
+      // 📍 Atualiza marcador no mapa
+      function updateMarker(lat, lng, updatedAt) {
+        if (!map) initMap();
+
+        if (!hasMarker) {
+          marker = L.marker([lat, lng])
+            .addTo(map)
+            .bindPopup("📍 Localização atual")
+            .openPopup();
+          map.flyTo([lat, lng], 16);
+          hasMarker = true;
+          loading.style.display = "none";
+        } else {
+          marker.setLatLng([lat, lng]);
+          map.flyTo([lat, lng], 16);
+        }
+
+        updatedAtEl.textContent = formatTime(updatedAt);
+      }
+
+      // 🔹 Tenta pegar a última localização conhecida
+      initMap();
       fetch(`${SERVER_URL}/api/location/${userId}`)
         .then((res) => res.json())
         .then((data) => {
           if (data.latitude && data.longitude) {
-            initMap(data.latitude, data.longitude);
-            updatedAtEl.textContent = formatTime(data.updatedAt);
+            updateMarker(data.latitude, data.longitude, data.updatedAt);
           } else {
-            loadingText.innerHTML =
-              "⏳ Aguardando primeira localização do usuário...";
+            statusText.textContent = "Aguardando primeira atualização...";
           }
         })
         .catch(() => {
-          loadingText.innerHTML =
-            "❌ Não foi possível obter localização inicial.";
+          statusText.textContent = "Falha ao carregar localização inicial.";
         });
 
-      // 🔁 Atualização em tempo real
+      // 🔁 Atualizações em tempo real
       socket.on(`locationUpdate-${userId}`, (data) => {
-        const { latitude, longitude, updatedAt } = data;
-
-        if (!map) {
-          initMap(latitude, longitude);
-        } else {
-          marker.setLatLng([latitude, longitude]);
-          map.panTo([latitude, longitude]);
-        }
-
-        updatedAtEl.textContent = formatTime(updatedAt);
+        updateMarker(data.latitude, data.longitude, data.updatedAt);
       });
     </script>
   </body>
